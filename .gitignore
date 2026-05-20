@@ -11,3 +11,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 data/
+sim/assets/
+sim/envs/../assets/
+*/_pick_place_scene.xml

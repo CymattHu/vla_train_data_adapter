@@ -1,0 +1,45 @@
+services:
+  vla-adapter:
+    build: .
+    volumes:
+      - ./data/input:/data/input
+      - ./data/output:/data/output
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # 示例：将 DROID 数据转为 LeRobot 格式
+  convert-lerobot:
+    build: .
+    volumes:
+      - ./data/input:/data/input
+      - ./data/output:/data/output
+    command: >
+      convert
+      --source droid
+      --input /data/input
+      --format lerobot
+      --output /data/output/lerobot
+
+  # 示例：将真实机器人数据转为 OpenPI 格式
+  convert-openpi:
+    build: .
+    volumes:
+      - ./data/input:/data/input
+      - ./data/output:/data/output
+    command: >
+      convert
+      --source real_robot
+      --input /data/input
+      --format openpi
+      --output /data/output/openpi
+
+  # 示例：检查数据集
+  inspect:
+    build: .
+    volumes:
+      - ./data/input:/data/input
+    command: >
+      inspect
+      --source real_robot
+      --input /data/input
+      --verbose

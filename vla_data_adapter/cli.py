@@ -73,6 +73,8 @@ def _build_source_adapter(source_type: str, input_dir: str, args: argparse.Names
         DroidConfig,
         LiberoAdapter,
         LiberoConfig,
+        MujocoSimAdapter,
+        MujocoSimConfig,
         RealRobotConfig,
         RealRobotTeleopAdapter,
     )
@@ -84,6 +86,7 @@ def _build_source_adapter(source_type: str, input_dir: str, args: argparse.Names
         "droid": lambda: DroidAdapter(DroidConfig(data_dir=data_dir, max_episodes=max_episodes)),
         "libero": lambda: LiberoAdapter(LiberoConfig(data_dir=data_dir, max_episodes=max_episodes)),
         "real_robot": lambda: RealRobotTeleopAdapter(RealRobotConfig(data_dir=data_dir, max_episodes=max_episodes)),
+        "mujoco_sim": lambda: MujocoSimAdapter(MujocoSimConfig(data_dir=data_dir, max_episodes=max_episodes)),
     }
 
     if source_type not in adapters:
@@ -138,7 +141,7 @@ def main() -> None:
 
     # convert
     p_convert = subparsers.add_parser("convert", help="转换数据格式")
-    p_convert.add_argument("--source", "-s", required=True, choices=["droid", "libero", "real_robot"])
+    p_convert.add_argument("--source", "-s", required=True, choices=["droid", "libero", "real_robot", "mujoco_sim"])
     p_convert.add_argument("--input", "-i", required=True, dest="input_dir")
     p_convert.add_argument("--format", "-f", required=True, dest="export_format", choices=["lerobot", "openpi", "groot"])
     p_convert.add_argument("--output", "-o", required=True, dest="output_dir")
@@ -150,7 +153,7 @@ def main() -> None:
 
     # inspect
     p_inspect = subparsers.add_parser("inspect", help="检查数据集信息")
-    p_inspect.add_argument("--source", "-s", required=True, choices=["droid", "libero", "real_robot"])
+    p_inspect.add_argument("--source", "-s", required=True, choices=["droid", "libero", "real_robot", "mujoco_sim"])
     p_inspect.add_argument("--input", "-i", required=True, dest="input_dir")
     p_inspect.add_argument("--max-episodes", type=int, default=None)
     p_inspect.add_argument("--verbose", "-v", action="store_true")

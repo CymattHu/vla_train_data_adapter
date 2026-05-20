@@ -13,12 +13,19 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from pathlib import Path
 
 import mujoco
 import mujoco.viewer
 import numpy as np
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def run_live_simulation(max_steps: int = 300, speed: float = 1.0):
@@ -32,8 +39,8 @@ def run_live_simulation(max_steps: int = 300, speed: float = 1.0):
     policy = ScriptedPickPlacePolicy(
         model=env.model,
         data=env.data,
-        ik_step_size=0.15,
-        ik_damping=1e-3,
+        ik_step_size=0.5,
+        ik_damping=1e-4,
     )
 
     obs = env.reset(seed=42)

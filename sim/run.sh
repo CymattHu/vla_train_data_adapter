@@ -116,7 +116,7 @@ case "${1:-default}" in
     --view)
         print_info "启动可视化窗口（本地运行，非 Docker）..."
         cd "$PROJECT_DIR"
-        PYTHONPATH="$PROJECT_DIR" python sim/visualize.py --max-steps 300
+        PYTHONPATH="$PROJECT_DIR" python sim/visualize.py --max-steps 500
         exit 0
         ;;
     --replay)

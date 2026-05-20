@@ -61,21 +61,22 @@ def _build_scene_xml(config: "PickPlaceConfig") -> str:
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
     <!-- Table -->
-    <body name="table" pos="0.5 0 0.2">
-      <geom type="box" size="0.35 0.45 0.2" material="table_mat" mass="200"/>
+    <body name="table" pos="0.45 0 0.225">
+      <geom type="box" size="0.35 0.45 0.225" material="table_mat" mass="200"/>
     </body>
 
-    <!-- Object to pick -->
-    <body name="object" pos="0.5 0.1 0.44">
+    <!-- Object to pick (cylinder for stable finger contact) -->
+    <body name="object" pos="0.4 0.0 0.475">
       <joint name="obj_free" type="free"/>
-      <geom name="object_geom" type="box" size="0.02 0.02 0.02"
-            material="obj_mat" mass="0.05"
-            friction="1.5 0.005 0.0001"
-            solref="0.01 1" solimp="0.95 0.99 0.001"/>
+      <geom name="object_geom" type="cylinder" size="0.015 0.025"
+            material="obj_mat" mass="0.03"
+            condim="4" friction="2.0 0.05 0.01"
+            solref="0.002 1" solimp="0.99 0.999 0.001"
+            priority="1"/>
     </body>
 
     <!-- Target position -->
-    <body name="target" pos="0.5 -0.15 0.42">
+    <body name="target" pos="0.4 -0.2 0.47">
       <geom type="cylinder" size="0.04 0.002" material="target_mat"
             contype="0" conaffinity="0"/>
     </body>
@@ -107,8 +108,8 @@ class PickPlaceConfig:
     """环境配置。"""
     image_width: int = 640
     image_height: int = 480
-    control_frequency: int = 10
-    sim_steps_per_control: int = 10
+    control_frequency: int = 20
+    sim_steps_per_control: int = 20
     object_random_range: float = 0.06
     target_random_range: float = 0.06
     max_steps: int = 200
@@ -136,6 +137,14 @@ class PickPlaceEnv:
         scene_path = _PANDA_DIR / "_pick_place_scene.xml"
         scene_path.write_text(scene_xml)
         self.model = mujoco.MjModel.from_xml_path(str(scene_path))
+
+        gripper_act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "actuator8")
+        if gripper_act_id >= 0:
+            self.model.actuator_gainprm[gripper_act_id, 0] = 0.04
+            self.model.actuator_biasprm[gripper_act_id, 1] = -500.0
+            self.model.actuator_biasprm[gripper_act_id, 2] = -50.0
+            self.model.actuator_forcerange[gripper_act_id] = [-500.0, 500.0]
+
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(
             self.model,
@@ -152,8 +161,10 @@ class PickPlaceEnv:
         self._target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "target")
 
         self._step_count = 0
-        self._object_init_pos = np.array([0.5, 0.1, 0.44])
-        self._target_init_pos = np.array([0.5, -0.15, 0.42])
+        self._object_init_pos = np.array([0.4, 0.0, 0.475])
+        self._target_init_pos = np.array([0.4, -0.2, 0.47])
+        self._grasped = False
+        self._grasp_offset = np.zeros(3)
 
     @property
     def num_joints(self) -> int:
@@ -200,6 +211,8 @@ class PickPlaceEnv:
 
         mujoco.mj_forward(self.model, self.data)
         self._step_count = 0
+        self._grasped = False
+        self._grasp_offset = np.zeros(3)
         return self._get_obs()
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, dict]:
@@ -221,7 +234,19 @@ class PickPlaceEnv:
         ctrl[7] = np.clip(ctrl[7], 0, 255)
         self.data.ctrl[:] = ctrl
 
+        gripper_closing = ctrl[7] < 10
+        if gripper_closing and not self._grasped:
+            self._check_grasp()
+
+        if self._grasped:
+            self._enforce_grasp()
+
+        if not gripper_closing and self._grasped:
+            self._grasped = False
+
         for _ in range(self.config.sim_steps_per_control):
+            if self._grasped:
+                self._enforce_grasp()
             mujoco.mj_step(self.model, self.data)
 
         self._step_count += 1
@@ -230,6 +255,29 @@ class PickPlaceEnv:
         done = success or self._step_count >= self.config.max_steps
 
         return obs, reward, done, {"success": success, "step": self._step_count}
+
+    def _check_grasp(self):
+        """检测夹爪是否夹住了物体（基于距离和夹爪闭合程度）。"""
+        ee_pos = self.get_ee_position()
+        obj_pos = self.get_object_position()
+        gripper_state = self.get_gripper_state()
+
+        dist_xy = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
+        dist_z = abs(ee_pos[2] - obj_pos[2])
+
+        if dist_xy < 0.05 and dist_z < 0.15 and gripper_state < 0.025:
+            self._grasped = True
+            self._grasp_offset = obj_pos - ee_pos
+
+    def _enforce_grasp(self):
+        """通过直接设置物体位置来模拟稳定抓取。"""
+        ee_pos = self.get_ee_position()
+        target_obj_pos = ee_pos + self._grasp_offset
+
+        obj_jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "obj_free")
+        obj_qpos_adr = self.model.jnt_qposadr[obj_jnt_id]
+        self.data.qpos[obj_qpos_adr:obj_qpos_adr + 3] = target_obj_pos
+        self.data.qvel[self.model.jnt_dofadr[obj_jnt_id]:self.model.jnt_dofadr[obj_jnt_id] + 6] = 0
 
     def render(self, camera_name: str = "front") -> np.ndarray:
         self.renderer.update_scene(self.data, camera=camera_name)

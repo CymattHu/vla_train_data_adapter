@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,16 +14,14 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 _MENAGERIE_DIR = Path(__file__).parent.parent / "assets" / "mujoco_menagerie"
 _PANDA_DIR = _MENAGERIE_DIR / "franka_emika_panda"
 
 
 def _build_scene_xml(config: "PickPlaceConfig") -> str:
-    """构建包含 Panda + 桌面任务的场景 XML。
-
-    通过 <include> 引入官方 panda.xml，再添加桌子、物体、相机。
-    在 hand body 上添加 ee_site 用于 IK 计算。
-    """
+    """构建包含 Panda + 桌面任务的场景 XML。"""
     panda_xml_path = _PANDA_DIR / "panda.xml"
     if not panda_xml_path.exists():
         raise FileNotFoundError(
@@ -34,7 +33,7 @@ def _build_scene_xml(config: "PickPlaceConfig") -> str:
 <mujoco model="panda_pick_place">
   <include file="{panda_xml_path}"/>
 
-  <option timestep="0.002" integrator="implicitfast"/>
+  <option timestep="0.002" integrator="implicitfast" noslip_iterations="5" noslip_tolerance="1e-6"/>
 
   <statistic center="0.3 0 0.4" extent="0.8"/>
 
@@ -65,18 +64,18 @@ def _build_scene_xml(config: "PickPlaceConfig") -> str:
       <geom type="box" size="0.35 0.45 0.225" material="table_mat" mass="200"/>
     </body>
 
-    <!-- Object to pick (cylinder for stable finger contact) -->
-    <body name="object" pos="0.4 0.0 0.475">
+    <!-- Object to pick: cube 5cm -->
+    <body name="object" pos="0.30 0.0 0.475">
       <joint name="obj_free" type="free"/>
-      <geom name="object_geom" type="cylinder" size="0.015 0.025"
-            material="obj_mat" mass="0.03"
-            condim="4" friction="2.0 0.05 0.01"
-            solref="0.002 1" solimp="0.99 0.999 0.001"
+      <geom name="object_geom" type="box" size="0.025 0.025 0.025"
+            material="obj_mat" mass="0.05"
+            condim="6" friction="2.0 0.1 0.01"
+            solref="0.001 1.0" solimp="0.99 0.999 0.001"
             priority="1"/>
     </body>
 
     <!-- Target position -->
-    <body name="target" pos="0.4 -0.2 0.47">
+    <body name="target" pos="0.30 -0.12 0.47">
       <geom type="cylinder" size="0.04 0.002" material="target_mat"
             contype="0" conaffinity="0"/>
     </body>
@@ -88,16 +87,15 @@ def _build_scene_xml(config: "PickPlaceConfig") -> str:
     <camera name="side" pos="1.3 0 0.7" xyaxes="0 1 0 -0.4 0 0.92"/>
   </worldbody>
 
-  <!-- EE site 附加到 hand body 上，用于 IK 计算 -->
   <worldbody>
     <body name="ee_site_body" mocap="true">
       <site name="ee_target_vis" size="0.01" rgba="1 0 0 0.3"/>
     </body>
   </worldbody>
 
-  <!-- 在 hand body 上附加 site -->
   <contact>
     <exclude body1="table" body2="link0"/>
+    <exclude body1="hand" body2="object"/>
   </contact>
 </mujoco>
 """
@@ -109,11 +107,11 @@ class PickPlaceConfig:
     image_width: int = 640
     image_height: int = 480
     control_frequency: int = 20
-    sim_steps_per_control: int = 20
-    object_random_range: float = 0.06
-    target_random_range: float = 0.06
-    max_steps: int = 200
-    success_threshold: float = 0.04
+    sim_steps_per_control: int = 50
+    object_random_range: float = 0.03
+    target_random_range: float = 0.03
+    max_steps: int = 600
+    success_threshold: float = 0.05
 
 
 class PickPlaceEnv:
@@ -122,6 +120,7 @@ class PickPlaceEnv:
     使用 mujoco_menagerie/franka_emika_panda/panda.xml 官方模型。
     - 7 关节 position actuator + 1 夹爪 actuator（ctrl 0~255）
     - 通过 hand body 位置获取末端执行器位姿
+    - 纯物理摩擦抓取（无 grasp-lock）
     """
 
     JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"]
@@ -138,12 +137,8 @@ class PickPlaceEnv:
         scene_path.write_text(scene_xml)
         self.model = mujoco.MjModel.from_xml_path(str(scene_path))
 
-        gripper_act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "actuator8")
-        if gripper_act_id >= 0:
-            self.model.actuator_gainprm[gripper_act_id, 0] = 0.04
-            self.model.actuator_biasprm[gripper_act_id, 1] = -500.0
-            self.model.actuator_biasprm[gripper_act_id, 2] = -50.0
-            self.model.actuator_forcerange[gripper_act_id] = [-500.0, 500.0]
+        self._tune_gripper_actuator()
+        self._tune_finger_friction()
 
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(
@@ -161,10 +156,35 @@ class PickPlaceEnv:
         self._target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "target")
 
         self._step_count = 0
-        self._object_init_pos = np.array([0.4, 0.0, 0.475])
-        self._target_init_pos = np.array([0.4, -0.2, 0.47])
-        self._grasped = False
-        self._grasp_offset = np.zeros(3)
+        self._object_init_pos = np.array([0.30, 0.0, 0.475])
+        self._target_init_pos = np.array([0.30, -0.12, 0.47])
+
+    def _tune_gripper_actuator(self):
+        """增大夹爪执行器力量。保持 ctrl 范围映射：0=闭合, 255=全开(0.04m)。"""
+        act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "actuator8")
+        if act_id >= 0:
+            kp = 800.0
+            kv = 50.0
+            gain = kp * 0.04 / 255.0
+            self.model.actuator_gainprm[act_id, 0] = gain
+            self.model.actuator_biasprm[act_id, 0] = 0.0
+            self.model.actuator_biasprm[act_id, 1] = -kp
+            self.model.actuator_biasprm[act_id, 2] = -kv
+            self.model.actuator_forcerange[act_id] = [-1000.0, 1000.0]
+
+    def _tune_finger_friction(self):
+        """设置手指碰撞 geom 的高摩擦力。"""
+        lf_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        rf_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+
+        for i in range(self.model.ngeom):
+            body_id = self.model.geom_bodyid[i]
+            if body_id in (lf_id, rf_id):
+                self.model.geom_friction[i] = [2.0, 0.1, 0.01]
+                self.model.geom_condim[i] = 6
+                self.model.geom_priority[i] = 1
+                self.model.geom_solref[i] = [0.001, 1.0]
+                self.model.geom_solimp[i] = [0.99, 0.999, 0.001, 0.5, 2.0]
 
     @property
     def num_joints(self) -> int:
@@ -172,7 +192,7 @@ class PickPlaceEnv:
 
     @property
     def num_actuators(self) -> int:
-        return self.model.nu  # 8: 7 joints + 1 gripper
+        return self.model.nu
 
     def reset(self, seed: int | None = None) -> dict:
         """重置环境。"""
@@ -209,19 +229,14 @@ class PickPlaceEnv:
         self.data.ctrl[:7] = self.HOME_QPOS
         self.data.ctrl[7] = self.GRIPPER_OPEN
 
-        mujoco.mj_forward(self.model, self.data)
+        for _ in range(100):
+            mujoco.mj_step(self.model, self.data)
+
         self._step_count = 0
-        self._grasped = False
-        self._grasp_offset = np.zeros(3)
         return self._get_obs()
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, dict]:
-        """执行一步动作。
-
-        Args:
-            action: (8,) [7 joint targets + 1 gripper (0~255)]
-                   或 (9,) [7 joints + gripper_open_flag(0/1) + unused]
-        """
+        """执行一步动作（纯物理，无 grasp-lock）。"""
         ctrl = np.zeros(self.model.nu)
         ctrl[:7] = action[:7]
 
@@ -234,19 +249,7 @@ class PickPlaceEnv:
         ctrl[7] = np.clip(ctrl[7], 0, 255)
         self.data.ctrl[:] = ctrl
 
-        gripper_closing = ctrl[7] < 10
-        if gripper_closing and not self._grasped:
-            self._check_grasp()
-
-        if self._grasped:
-            self._enforce_grasp()
-
-        if not gripper_closing and self._grasped:
-            self._grasped = False
-
         for _ in range(self.config.sim_steps_per_control):
-            if self._grasped:
-                self._enforce_grasp()
             mujoco.mj_step(self.model, self.data)
 
         self._step_count += 1
@@ -255,29 +258,6 @@ class PickPlaceEnv:
         done = success or self._step_count >= self.config.max_steps
 
         return obs, reward, done, {"success": success, "step": self._step_count}
-
-    def _check_grasp(self):
-        """检测夹爪是否夹住了物体（基于距离和夹爪闭合程度）。"""
-        ee_pos = self.get_ee_position()
-        obj_pos = self.get_object_position()
-        gripper_state = self.get_gripper_state()
-
-        dist_xy = np.linalg.norm(ee_pos[:2] - obj_pos[:2])
-        dist_z = abs(ee_pos[2] - obj_pos[2])
-
-        if dist_xy < 0.05 and dist_z < 0.15 and gripper_state < 0.025:
-            self._grasped = True
-            self._grasp_offset = obj_pos - ee_pos
-
-    def _enforce_grasp(self):
-        """通过直接设置物体位置来模拟稳定抓取。"""
-        ee_pos = self.get_ee_position()
-        target_obj_pos = ee_pos + self._grasp_offset
-
-        obj_jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "obj_free")
-        obj_qpos_adr = self.model.jnt_qposadr[obj_jnt_id]
-        self.data.qpos[obj_qpos_adr:obj_qpos_adr + 3] = target_obj_pos
-        self.data.qvel[self.model.jnt_dofadr[obj_jnt_id]:self.model.jnt_dofadr[obj_jnt_id] + 6] = 0
 
     def render(self, camera_name: str = "front") -> np.ndarray:
         self.renderer.update_scene(self.data, camera=camera_name)
@@ -290,7 +270,6 @@ class PickPlaceEnv:
         ])
 
     def get_ee_position(self) -> np.ndarray:
-        """通过 hand body 位置获取 EE 位置。"""
         return self.data.xpos[self._hand_body_id].copy()
 
     def get_object_position(self) -> np.ndarray:
@@ -300,7 +279,7 @@ class PickPlaceEnv:
         return self.model.body_pos[self._target_body_id].copy()
 
     def get_gripper_state(self) -> float:
-        """夹爪状态：0=闭合, 0.04=完全张开。"""
+        """夹爪状态：0=完全闭合, 0.04=完全张开。"""
         fj1 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_joint1")
         return float(self.data.qpos[self.model.jnt_qposadr[fj1]])
 
@@ -317,8 +296,7 @@ class PickPlaceEnv:
         obj_pos = obs["object_position"]
         target_pos = obs["target_position"]
         dist = np.linalg.norm(obj_pos[:2] - target_pos[:2])
-        height_ok = obj_pos[2] > 0.4
-        success = dist < self.config.success_threshold and height_ok
+        success = dist < self.config.success_threshold and obj_pos[2] > 0.48
         reward = -dist + (10.0 if success else 0.0)
         return float(reward), bool(success)
 

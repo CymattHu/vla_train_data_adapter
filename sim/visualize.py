@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 
 
-def run_live_simulation(max_steps: int = 300, speed: float = 1.0):
+def run_live_simulation(max_steps: int = 400, speed: float = 1.0):
     """启动 MuJoCo viewer 实时观看仿真。"""
     from sim.envs import PickPlaceEnv
     from sim.envs.pick_place import PickPlaceConfig
@@ -178,3 +178,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import os
+    os._exit(0)

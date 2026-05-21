@@ -70,16 +70,20 @@ def run_live_simulation(max_steps: int = 400, speed: float = 1.0):
             viewer.sync()
             step += 1
 
-            if info.get("success"):
-                print(f"  Step {step}: 任务成功！")
+            task_done = policy.phase.name == "DONE"
+            if task_done:
+                done = True
 
             elapsed = time.time() - step_start
             sleep_time = dt / speed - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        status = "SUCCESS" if info.get("success") else "TIMEOUT"
+        status = "SUCCESS" if info.get("success") else ("DONE" if policy.phase.name == "DONE" else "TIMEOUT")
         print(f"\n仿真结束: {step} steps, {status}")
+        print(f"最终阶段: {policy.phase.name}")
+        print(f"物体位置: {obs['object_position']}")
+        print(f"目标位置: {obs['target_position']}")
 
 
 

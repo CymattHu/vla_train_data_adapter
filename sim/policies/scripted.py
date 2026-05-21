@@ -90,9 +90,7 @@ class ScriptedPickPlacePolicy:
 
         gripper_open = self._get_gripper_target()
 
-        if self.phase == Phase.LIFT:
-            joint_targets = self.HOME_QPOS.copy()
-        elif self.phase == Phase.MOVE_TO_TARGET:
+        if self.phase in (Phase.LIFT, Phase.MOVE_TO_TARGET):
             target_qpos = self.HOME_QPOS.copy()
             j1_angle = np.arctan2(target_pos[1], target_pos[0])
             target_qpos[0] = j1_angle
@@ -207,15 +205,19 @@ class ScriptedPickPlacePolicy:
                 self._phase_step = 0
 
         elif self.phase == Phase.LIFT:
-            if (ee_pos[2] > 0.58 or self._phase_step >= 200) and self._phase_step >= 30:
-                logger.info(f"    LIFT done (z={ee_pos[2]:.4f}, steps={self._phase_step})")
-                self.phase = Phase.MOVE_TO_TARGET
-                self._phase_step = 0
+            goal_xy = np.array([target_pos[0], target_pos[1]])
+            dist_xy = np.linalg.norm(ee_pos[:2] - goal_xy)
+            lifted = ee_pos[2] > 0.58
+            if (lifted and dist_xy < 0.05) or self._phase_step >= 200:
+                if self._phase_step >= 20:
+                    logger.info(f"    LIFT done (z={ee_pos[2]:.4f}, dist_xy={dist_xy:.4f}, steps={self._phase_step})")
+                    self.phase = Phase.MOVE_TO_TARGET
+                    self._phase_step = 0
 
         elif self.phase == Phase.MOVE_TO_TARGET:
             goal_xy = np.array([target_pos[0], target_pos[1]])
             dist_xy = np.linalg.norm(ee_pos[:2] - goal_xy)
-            if (dist_xy < 0.03 or self._phase_step >= 150) and self._phase_step >= 20:
+            if (dist_xy < 0.03 or self._phase_step >= 80) and self._phase_step >= 10:
                 logger.info(f"    MOVE_TO_TARGET done (dist_xy={dist_xy:.4f}, steps={self._phase_step})")
                 self.phase = Phase.PLACE
                 self._phase_step = 0

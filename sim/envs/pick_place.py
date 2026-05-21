@@ -255,7 +255,7 @@ class PickPlaceEnv:
         self._step_count += 1
         obs = self._get_obs()
         reward, success = self._compute_reward(obs)
-        done = success or self._step_count >= self.config.max_steps
+        done = self._step_count >= self.config.max_steps
 
         return obs, reward, done, {"success": success, "step": self._step_count}
 

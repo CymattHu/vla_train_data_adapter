@@ -37,7 +37,7 @@ class ScriptedPickPlacePolicy:
         model: mujoco.MjModel,
         data: mujoco.MjData,
         approach_height: float = 0.12,
-        grasp_height: float = 0.095,
+        grasp_height: float = 0.06,
         lift_height: float = 0.04,
         pos_threshold: float = 0.015,
         noise_scale: float = 0.0005,
@@ -71,6 +71,7 @@ class ScriptedPickPlacePolicy:
         self._phase_step = 0
         self._step = 0
         self._pick_z = None
+        self._lift_target = None
 
     HOME_QPOS = np.array([0, -0.785, 0, -2.356, 0, 1.571, -0.785])
 
@@ -90,11 +91,20 @@ class ScriptedPickPlacePolicy:
 
         gripper_open = self._get_gripper_target()
 
-        if self.phase in (Phase.LIFT, Phase.MOVE_TO_TARGET):
+        if self.phase == Phase.LIFT:
+            if self._lift_target is None:
+                self._lift_target = ee_pos.copy()
+                self._lift_target[2] += 0.02
+            goal = self._lift_target
+            joint_targets = self.ik_solver.solve_position(goal, current_joints)
+            alpha = 0.15
+            joint_targets = current_joints + alpha * (joint_targets - current_joints)
+        elif self.phase == Phase.MOVE_TO_TARGET:
             target_qpos = self.HOME_QPOS.copy()
             j1_angle = np.arctan2(target_pos[1], target_pos[0])
             target_qpos[0] = j1_angle
-            joint_targets = target_qpos
+            alpha = 0.08
+            joint_targets = current_joints + alpha * (target_qpos - current_joints)
         elif self.phase == Phase.PLACE:
             goal_pos = self._get_goal_position(ee_pos, obj_pos, target_pos)
             delta = goal_pos - ee_pos
@@ -200,19 +210,16 @@ class ScriptedPickPlacePolicy:
             self._grasp_counter += 1
             if self._grasp_counter > 80:
                 self._pick_z = obj_pos[2]
+                self._lift_target = None
                 logger.info(f"    GRASP done (held {self._grasp_counter} steps, pick_z={self._pick_z:.4f})")
                 self.phase = Phase.LIFT
                 self._phase_step = 0
 
         elif self.phase == Phase.LIFT:
-            goal_xy = np.array([target_pos[0], target_pos[1]])
-            dist_xy = np.linalg.norm(ee_pos[:2] - goal_xy)
-            lifted = ee_pos[2] > 0.58
-            if (lifted and dist_xy < 0.05) or self._phase_step >= 200:
-                if self._phase_step >= 20:
-                    logger.info(f"    LIFT done (z={ee_pos[2]:.4f}, dist_xy={dist_xy:.4f}, steps={self._phase_step})")
-                    self.phase = Phase.MOVE_TO_TARGET
-                    self._phase_step = 0
+            if self._phase_step >= 40:
+                logger.info(f"    LIFT done (z={ee_pos[2]:.4f}, steps={self._phase_step})")
+                self.phase = Phase.MOVE_TO_TARGET
+                self._phase_step = 0
 
         elif self.phase == Phase.MOVE_TO_TARGET:
             goal_xy = np.array([target_pos[0], target_pos[1]])

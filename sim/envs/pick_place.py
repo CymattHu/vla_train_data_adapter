@@ -75,7 +75,7 @@ def _build_scene_xml(config: "PickPlaceConfig") -> str:
     </body>
 
     <!-- Target position -->
-    <body name="target" pos="0.30 -0.12 0.47">
+    <body name="target" pos="0.30 -0.12 0.45">
       <geom type="cylinder" size="0.04 0.002" material="target_mat"
             contype="0" conaffinity="0"/>
     </body>

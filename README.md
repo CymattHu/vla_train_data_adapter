@@ -25,7 +25,7 @@ Data Source Layer                  Canonical Episode              Export Layer
 
 ## 快速开始（Docker）
 
-整个流程只需 3 步即可跑通数据转换 pipeline。
+整个流程只需 3 步即可跑通数据转换 pipeline。`make`（不带参数）可随时查看所有可用命令。
 
 ### 前置要求
 
@@ -35,25 +35,36 @@ Data Source Layer                  Canonical Episode              Export Layer
 
 ### Step 1：构建镜像
 
-```bash
-# 使用 make
-make build
+项目包含两个镜像：`vla-adapter`（数据转换）和 `vla-sim`（MuJoCo 仿真，含无头渲染依赖）。
 
-# 或直接 docker build
-docker build -t vla-adapter .
+```bash
+# 一次性构建两个镜像
+make build-all
+
+# 或分别构建
+make build        # 数据转换镜像 vla-adapter
+make build-sim    # MuJoCo 仿真镜像 vla-sim
 ```
 
 ### Step 2：准备数据
 
-可以使用自己的数据，也可以用内置脚本生成示例数据来快速验证：
+有三种方式得到 `data/input/` 下的数据，任选其一：
 
 ```bash
-# 生成 5 个 episode 的示例数据（需要本地有 python + numpy + Pillow）
+# 方式 A（推荐）：用 MuJoCo 仿真生成 pick-and-place demonstration
+make sim-quick    # 快速生成 5 个 episode（冒烟测试）
+make sim          # 生成 50 个成功 episode
+make sim-full     # 生成 200 个成功 episode
+make sim-custom ARGS="--episodes 100 --seed 123 --success-only"
+
+# 方式 B：用纯随机示例数据快速验证 pipeline（无需 MuJoCo，本地 Python）
 make sample
 
-# 或手动运行
-python scripts/generate_sample_data.py --output ./data/input --episodes 5
+# 方式 C：放入你自己的数据，遵循下方目录结构即可
 ```
+
+> 仿真细节（任务、IK 求解器、专家策略、可调参数）见 [`sim/README.md`](sim/README.md)。
+> 仿真输出格式与真机遥操作 (`RealRobotTeleopAdapter`) 完全一致，仅 `source_type` 标记为 `sim`，因此可与真机数据无缝混用。
 
 生成后目录结构如下：
 ```
@@ -86,6 +97,9 @@ make convert-openpi
 # 转为 GR00T 格式
 make convert-groot
 
+# 一次性转为以上全部格式
+make convert-all
+
 # 检查数据集质量
 make inspect
 
@@ -100,12 +114,24 @@ docker run --rm \
   -v $(pwd)/data/input:/data/input \
   -v $(pwd)/data/output:/data/output \
   vla-adapter \
-  convert --source real_robot --input /data/input --format lerobot --output /data/output/lerobot
+  convert --source mujoco_sim --input /data/input --format lerobot --output /data/output/lerobot
+```
+
+### 一键跑通完整流程
+
+```bash
+# 仿真生成 → 转 LeRobot → 检查质量
+make pipeline          # sim (50 个) + convert-lerobot + inspect
+make pipeline-quick    # sim-quick (5 个) + convert-lerobot + inspect
 ```
 
 ### 使用 Docker Compose
 
 ```bash
+# MuJoCo 仿真生成数据
+docker compose run --rm sim-generate          # 50 个 episode
+docker compose run --rm sim-generate-quick    # 5 个 episode（快速测试）
+
 # 转 LeRobot 格式
 docker compose run --rm convert-lerobot
 
@@ -207,7 +233,12 @@ vla_train_data_adapter/
 ├── Makefile
 ├── pyproject.toml
 ├── scripts/
-│   └── generate_sample_data.py    # 示例数据生成
+│   └── generate_sample_data.py    # 随机示例数据生成
+├── sim/                           # MuJoCo 仿真数据生成（独立子项目，见 sim/README.md）
+│   ├── Dockerfile                 # 仿真镜像（含 MuJoCo + OSMesa 无头渲染）
+│   ├── generate_data.py           # 仿真数据生成主程序
+│   ├── envs/pick_place.py         # Pick-and-Place 环境
+│   └── policies/                  # IK 求解器 + 状态机专家策略
 ├── tests/
 │   ├── test_schema.py
 │   ├── test_normalization.py
@@ -218,6 +249,7 @@ vla_train_data_adapter/
     ├── sources/                   # 数据源适配器
     │   ├── base.py                # DataSourceAdapter 基类
     │   ├── real_robot.py          # 真实机器人遥操作
+    │   ├── mujoco_sim.py          # MuJoCo 仿真（读取 sim/ 生成的数据）
     │   ├── droid.py               # DROID 数据集
     │   └── libero.py              # LIBERO 数据集
     ├── exporters/                 # 模型格式导出器
@@ -279,8 +311,9 @@ class MyModelAdapter(ModelDatasetAdapter):
 
 | 阶段 | 目标 | 工具 |
 |------|------|------|
-| 1. 数据采集 | 收集遥操作数据 | `RealRobotTeleopAdapter` |
-| 2. 数据验证 | 检查质量和完整性 | `vla-adapter inspect` |
-| 3. BC Baseline | 验证数据可用性 | ACT / Diffusion Policy + LeRobot |
-| 4. VLA Fine-tune | 训练 VLA 模型 | openpi/pi0 + LoRA |
-| 5. 评估 | sim + real rollout | policy server |
+| 1. 数据采集 | 仿真生成 / 收集遥操作数据 | `make sim` (MuJoCo) / `RealRobotTeleopAdapter` |
+| 2. 数据验证 | 检查质量和完整性 | `make inspect` |
+| 3. 格式转换 | 导出训练格式 | `make convert-lerobot` |
+| 4. BC Baseline | 验证数据可用性 | ACT / Diffusion Policy + LeRobot |
+| 5. VLA Fine-tune | 训练 VLA 模型 | openpi/pi0 + LoRA |
+| 6. 评估 | sim + real rollout | `sim/envs` + policy server |
